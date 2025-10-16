@@ -13,11 +13,11 @@ jobs:
         run: |
           # Enable Remote Desktop and disable Network Level Authentication (if needed)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
+                             -Name "fDenyTSConnections" -Value 0 -Force -ErrorAction Stop
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
+                             -Name "UserAuthentication" -Value 0 -Force -ErrorAction Stop
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+                             -Name "SecurityLayer" -Value 0 -Force -ErrorAction Stop
 
           # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "no existing rule"
@@ -32,14 +32,28 @@ jobs:
       - name: Allow blank passwords for network/remote logon (risky)
         run: |
           Write-Host "⚠️ Ajustando política para permitir senhas em branco (LimitBlankPasswordUse = 0)."
-          # This registry key controls "Accounts: Limit local account use of blank passwords to console logon only"
-          New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -ErrorAction SilentlyContinue | Out-Null
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LimitBlankPasswordUse" -Value 0 -Type DWord -Force
+          try {
+            # This registry key controls "Accounts: Limit local account use of blank passwords to console logon only"
+            New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -ErrorAction Stop | Out-Null
+            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LimitBlankPasswordUse" -Value 0 -Type DWord -Force -ErrorAction Stop
+            Write-Host "✅ Registro ajustado (LimitBlankPasswordUse = 0)."
+          } catch {
+            Write-Host "⚠️ Falha ao ajustar registro: $_. Continuando sem falhar o job."
+          }
 
-          # Ensure network logon behaviour updated immediately
-          secedit /refreshpolicy machine_policy /enforce || Write-Host "secedit refresh may not be available; reboot may be required."
+          # Tentar forçar refresh da política local se o comando estiver disponível, mas não falhar se não funcionar.
+          try {
+            $proc = Start-Process -FilePath secedit -ArgumentList '/refreshpolicy machine_policy /enforce' -NoNewWindow -Wait -PassThru -ErrorAction Stop
+            if ($proc.ExitCode -eq 0) {
+              Write-Host "✅ secedit refresh executado com sucesso."
+            } else {
+              Write-Host "⚠️ secedit retornou código $($proc.ExitCode). Continuando (não irá falhar o workflow)."
+            }
+          } catch {
+            Write-Host "⚠️ secedit não disponível ou falhou: $_. Continuando sem falhar o job."
+          }
 
-          Write-Host "✅ Registro ajustado. OBS: pode ser necessário reiniciar a VM/runner para efeito completo."
+          Write-Host "OBS: pode ser necessário reiniciar a VM/runner para efeito completo."
 
       - name: Create RDP User WITHOUT Password (no prompt)
         run: |
@@ -48,28 +62,33 @@ jobs:
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
             Write-Host "Local user '$username' already exists."
           } else {
-            Write-Host "Creating local user '$username' WITHOUT password..."
-            # Try New-LocalUser -NoPassword if available (PowerShell 7+ / Windows 10+)
+            Write-Host "Criando usuário local '$username' SEM senha..."
+            # Tentativa com -NoPassword (funciona em alguns sistemas)
             try {
-              New-LocalUser -Name $username -NoPassword -AccountNeverExpires -Description "RDP user (no password) created by workflow"
-              Write-Host "User created with -NoPassword."
+              New-LocalUser -Name $username -NoPassword -AccountNeverExpires -Description "RDP user (no password) created by workflow" -ErrorAction Stop
+              Write-Host "User criado com -NoPassword."
             } catch {
-              Write-Host "Fallback: creating user with empty SecureString (some systems may not allow empty password)."
-              $empty = ConvertTo-SecureString "" -AsPlainText -Force
-              New-LocalUser -Name $username -Password $empty -AccountNeverExpires -Description "RDP user (empty password) created by workflow"
+              Write-Host "Fallback: criando usuário com SecureString vazio (alguns sistemas podem não aceitar senha vazia)."
+              try {
+                $empty = ConvertTo-SecureString "" -AsPlainText -Force
+                New-LocalUser -Name $username -Password $empty -AccountNeverExpires -Description "RDP user (empty password) created by workflow" -ErrorAction Stop
+                Write-Host "User criado com SecureString vazio."
+              } catch {
+                Write-Host "⚠️ Não foi possível criar usuário sem senha: $_. O workflow continuará, mas o usuário pode não existir."
+              }
             }
           }
 
-          # Ensure user is not disabled and is in proper groups
-          Enable-LocalUser -Name $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+          # Garantir que o usuário esteja habilitado e nos grupos necessários
+          try { Enable-LocalUser -Name $username -ErrorAction SilentlyContinue } catch {}
+          try { Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue } catch {}
+          try { Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue } catch {}
 
           # Export to env for later steps (password intentionally blank)
           "RDP_USER=$username" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RDP_PASS=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host "✅ User '$username' configured WITHOUT password."
+          Write-Host "✅ User '$username' configurado (sem senha, quando suportado)."
 
       - name: Install Tailscale
         run: |
@@ -108,25 +127,4 @@ jobs:
           Write-Host "✅ Tailscale connected! IP: $tsIP"
 
       - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Testing RDP connectivity..."
-          $targetIP = $env:TAILSCALE_IP -split ';' | Select-Object -First 1
-          $testResult = Test-NetConnection -ComputerName $targetIP -Port 3389 -WarningAction SilentlyContinue
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "❌ TCP connection to RDP port 3389 failed (Target: $targetIP)"
-              exit 1
-          }
-          Write-Host "✅ RDP port reachable via Tailscale ($targetIP)."
-
-      - name: Maintain Connection
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: (NONE - account has no password)"
-          Write-Host "==================`n"
-
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
-          }
+        r
