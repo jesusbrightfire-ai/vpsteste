@@ -12,7 +12,6 @@ jobs:
       # 🔽 SEU CÓDIGO ORIGINAL INTACTO 🔽
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
@@ -88,16 +87,22 @@ jobs:
 
   auto-restart:
     needs: secure-rdp
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
-      - name: Wait before restarting
+      - name: Infinite Auto-Restart Loop
+        shell: pwsh
         run: |
-          echo "⏳ Aguardando antes de reiniciar..."
-          sleep 60   # 🔹 Aqui você põe 330m (5h30) no real, para teste use 60s (1min)
-      - name: Restart workflow
-        run: |
-          echo "🚀 Reiniciando workflow..."
-          curl -X POST -H "Accept: application/vnd.github+json" \
-               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-               https://api.github.com/repos/${{ github.repository }}/actions/workflows/RDP.yml/dispatches \
-               -d '{"ref":"${{ github.ref }}"}'
+          while ($true) {
+            Write-Host "⏳ Aguardando antes de reiniciar..."
+            # altere aqui: 60s para testes ou 20400s (5h40)
+            Start-Sleep -Seconds 60
+            Write-Host "🚀 Reiniciando workflow..."
+            $headers = @{
+              "Accept" = "application/vnd.github+json"
+              "Authorization" = "Bearer $env:GITHUB_TOKEN"
+            }
+            $body = @{
+              ref = "${{ github.ref }}"
+            } | ConvertTo-Json
+            Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/RDP.yml/dispatches" -Method Post -Headers $headers -Body $body
+          }
