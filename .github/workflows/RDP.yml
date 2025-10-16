@@ -9,12 +9,12 @@ permissions:
 
 env:
   # ==================================================
-  # 🕒 CONFIGURAÇÕES DE TEMPO (nível global)
+  # 🕒 CONFIGURAÇÕES DE TEMPO
   # ==================================================
-  # Quantos segundos o RDP ficará ativo (ex: 60 = 1min, 20400 = 5h40min)
+  # Duração total do RDP (em segundos)
   RDP_DURATION_SECONDS: 60
-  
-  # Quantos segundos o auto-restart deve esperar antes de reiniciar o workflow
+
+  # Atraso antes de reiniciar (em segundos)
   RESTART_DELAY_SECONDS: 10
   # ==================================================
 
@@ -27,11 +27,11 @@ jobs:
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
+                           -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
+                           -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+                           -Name "SecurityLayer" -Value 0 -Force
 
           netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "no existing rule"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
@@ -72,15 +72,45 @@ jobs:
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) -join ";"
-              if ($tsIP) { break }
-              Start-Sleep -Seconds 5
-              $retries++
+            $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) -join ";"
+            if ($tsIP) { break }
+            Start-Sleep -Seconds 5
+            $retries++
           }
 
           if (-not $tsIP) { exit 1 }
           "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Verify RDP Accessibility
+      - name: Show RDP Access Info
         run: |
-          $ta
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $env:RDP_USER"
+          Write-Host "Password: $env:RDP_PASS"
+          Write-Host "==================`n"
+
+      - name: Keep RDP Active
+        run: |
+          $duration = [int]$env:RDP_DURATION_SECONDS
+          $loops = [math]::Ceiling($duration / 10)
+
+          for ($i = 1; $i -le $loops; $i++) {
+            Write-Host "[$(Get-Date)] RDP ativo... ($i/$loops)"
+            Start-Sleep -Seconds 10
+          }
+
+          Write-Host "🌀 Tempo expirou. Reiniciando workflow em $env:RESTART_DELAY_SECONDS segundos..."
+          Start-Sleep -Seconds $env:RESTART_DELAY_SECONDS
+
+          # Reexecuta o próprio workflow automaticamente
+          $headers = @{
+            "Accept" = "application/vnd.github+json"
+            "Authorization" = "Bearer $env:GITHUB_TOKEN"
+          }
+          $body = @{
+            ref = "${{ github.ref }}"
+          } | ConvertTo-Json
+          $workflowFile = "${{ github.workflow }}.yml"
+
+          Write-Host "🚀 Reenviando workflow..."
+          Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$workflowFile/dispatches" -Method Post -Headers $headers -Body $body
