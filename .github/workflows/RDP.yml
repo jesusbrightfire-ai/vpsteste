@@ -60,44 +60,15 @@ jobs:
           "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "✅ Tailscale IP: $ip"
 
-      - name: Prepare baixartudo.exe to auto-run on RDP login
-        shell: pwsh
-        run: |
-          $exeSource = Join-Path $env:GITHUB_WORKSPACE "baixartudo.exe"
-          if (-not (Test-Path $exeSource)) {
-            Write-Error "❌ baixartudo.exe not found!"
-            exit 1
-          }
-
-          $destDir = "C:\Users\RDP\Desktop"
-          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-          Copy-Item $exeSource -Destination $destDir -Force
-          Write-Host "✅ Copied baixartudo.exe to Desktop"
-
-          # PowerShell script that runs baixartudo.exe
-          $psScript = @"
-          Start-Sleep -Seconds 5
-          Start-Process -FilePath `"$destDir\baixartudo.exe`" -WindowStyle Normal
-          "@
-          $scriptPath = "C:\Users\RDP\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\runbaixartudo.ps1"
-          New-Item -ItemType File -Path $scriptPath -Force -Value $psScript | Out-Null
-
-          # .bat launcher to ensure execution
-          $batFile = "C:\Users\RDP\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\runbaixartudo.bat"
-          "@echo off
-          powershell.exe -ExecutionPolicy Bypass -File `"$scriptPath`"
-          " | Out-File -FilePath $batFile -Encoding ASCII
-
-          Write-Host "✅ Configured baixartudo.exe to run on RDP login."
-
       - name: Show connection info
         shell: pwsh
         run: |
           Write-Host "`n==============================="
-          Write-Host "🟢 VPS ONLINE!"
-          Write-Host "🔹 Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "🔹 RDP user: $env:RDP_USER (no password)"
-          Write-Host "🔹 baixartudo.exe will auto-run on login"
+          Write-Host "🟢 SUA VPS ESTÀ ONLINE!"
+          Write-Host "🔹 IP: $env:TAILSCALE_IP"
+          Write-Host "🔹 Usuário: $env:RDP_USER "
+          Write-Host "🔹 Senha: nenhuma "
+          Write-Host "🔹 UTILIZE POR 6 HORAS SEM PREOCUPAÇÃO!"
           Write-Host "==============================="
 
       - name: Keep Alive
