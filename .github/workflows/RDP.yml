@@ -60,19 +60,35 @@ jobs:
           "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "✅ Tailscale IP: $ip"
 
+      - name: Download arquivos extras na área de trabalho
+        shell: pwsh
+        run: |
+          $userDesktop = "C:\Users\RDP\Desktop"
+          $url = "https://www.dropbox.com/scl/fi/qy9evq8pj3fyvq4e77j8c/arquivos_extraidos.zip?dl=1"
+          $zipPath = "$env:TEMP\arquivos_extraidos.zip"
+
+          Write-Host "==> Baixando arquivos extras..."
+          Invoke-WebRequest -Uri $url -OutFile $zipPath
+
+          Write-Host "==> Extraindo arquivos para a área de trabalho..."
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $userDesktop)
+
+          Write-Host "✅ Arquivos extras prontos na área de trabalho!"
+
       - name: Show connection info
         shell: pwsh
         run: |
           Write-Host "`n==============================="
-          Write-Host "🟢 SUA VPS ESTÀ ONLINE!"
+          Write-Host "🟢 SUA VPS ESTÁ ONLINE!"
           Write-Host "🔹 IP: $env:TAILSCALE_IP"
-          Write-Host "🔹 Usuário: $env:RDP_USER "
-          Write-Host "🔹 Senha: nenhuma "
+          Write-Host "🔹 Usuário: $env:RDP_USER"
+          Write-Host "🔹 Senha: nenhuma"
           Write-Host "🔹 UTILIZE POR 6 HORAS SEM PREOCUPAÇÃO!"
           Write-Host "==============================="
 
       - name: Keep Alive
         shell: pwsh
         run: |
-          Write-Host "⏳ VAMBORA"
+          Write-Host "⏳ Mantendo VPS ativa..."
           Start-Sleep -Seconds 3600
