@@ -28,10 +28,8 @@ jobs:
           if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
             net user $user /add /y
           }
-          # Add to admin and RDP groups
           net localgroup "Administrators" $user /add
           net localgroup "Remote Desktop Users" $user /add
-          # Allow login without password
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "AutoAdminLogon" /t REG_SZ /d "1" /f
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultUserName" /t REG_SZ /d "$user" /f
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultPassword" /t REG_SZ /d "" /f
@@ -60,21 +58,34 @@ jobs:
           "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "✅ Tailscale IP: $ip"
 
-      - name: Download arquivos extras na área de trabalho
+      - name: Install 7-Zip
+        shell: pwsh
+        run: |
+          Write-Host "==> Installing 7-Zip..."
+          $url = "https://www.7-zip.org/a/7z2301-x64.msi"
+          $file = "$env:TEMP\7zip.msi"
+          Invoke-WebRequest -Uri $url -OutFile $file
+          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
+          Write-Host "✅ 7-Zip Installed."
+
+      - name: Download and extract files
         shell: pwsh
         run: |
           $userDesktop = "C:\Users\RDP\Desktop"
-          $url = "https://www.dropbox.com/scl/fi/qy9evq8pj3fyvq4e77j8c/arquivos_extraidos.zip?dl=1"
-          $zipPath = "$env:TEMP\arquivos_extraidos.zip"
+          if (-not (Test-Path $userDesktop)) { New-Item -ItemType Directory -Path $userDesktop -Force }
 
-          Write-Host "==> Baixando arquivos extras..."
-          Invoke-WebRequest -Uri $url -OutFile $zipPath
+          $url = "https://www.dropbox.com/scl/fi/qy9evq8pj3fyvq4e77j8c/arquivos_extraidos.zip?rlkey=762hqioz27j68i26pgfi4cr6d&st=pl5dltbr&dl=1"
+          $filePath = "$env:TEMP\arquivos_extraidos.zip"
 
-          Write-Host "==> Extraindo arquivos para a área de trabalho..."
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $userDesktop)
+          Write-Host "==> Downloading files..."
+          Invoke-WebRequest -Uri $url -OutFile $filePath -UseBasicParsing
+          Start-Sleep -Seconds 2
 
-          Write-Host "✅ Arquivos extras prontos na área de trabalho!"
+          Write-Host "==> Extracting files..."
+          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
+          & $sevenZip x $filePath -o$userDesktop -y
+
+          Write-Host "✅ Files extracted to desktop."
 
       - name: Show connection info
         shell: pwsh
