@@ -18,10 +18,12 @@ jobs:
       - name: Enable RDP
         shell: pwsh
         run: |
+          Write-Host "==> Enabling Remote Desktop..."
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          Write-Host "✅ RDP enabled."
 
-      - name: Create user
+      - name: Create RDP user
         shell: pwsh
         run: |
           $user = "RDP"
@@ -34,15 +36,17 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
           "RDP_USER=$user" | Out-File -FilePath $env:GITHUB_ENV -Append
           "RDP_PASS=$pass" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "✅ User created: $user"
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          Write-Host "Installing Tailscale..."
+          Write-Host "==> Installing Tailscale..."
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $out = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $url -OutFile $out
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$out`"", "/quiet", "/norestart" -Wait
+          Start-Process msiexec.exe -ArgumentList "/i `"$out`" /quiet /norestart" -Wait
+          Write-Host "✅ Tailscale installed."
 
       - name: Connect to Tailscale
         shell: pwsh
@@ -51,10 +55,11 @@ jobs:
           Start-Sleep -Seconds 5
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-${{ github.run_id }}"
           $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) | Select-Object -First 1
+          if (-not $ip) { Write-Error "❌ Failed to obtain Tailscale IP"; exit 1 }
           "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Connected with IP: $ip"
+          Write-Host "✅ Connected to Tailscale at $ip"
 
-      - name: Run baixartudo.exe
+      - name: Schedule baixartudo.exe to run on RDP login
         shell: pwsh
         run: |
           $exePath = Join-Path $env:GITHUB_WORKSPACE "baixartudo.exe"
@@ -63,21 +68,32 @@ jobs:
             exit 1
           }
           Write-Host "✅ Found baixartudo.exe at $exePath"
-          Start-Process -FilePath $exePath -Wait -NoNewWindow
-          Write-Host "✅ baixartudo.exe finished successfully."
 
-      - name: Show connection info
+          # Copy to the RDP user's Desktop for visibility
+          $userProfile = "C:\Users\RDP"
+          $destDir = Join-Path $userProfile "Desktop"
+          New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+          Copy-Item -Path $exePath -Destination $destDir -Force
+          Write-Host "📁 Copied baixartudo.exe to $destDir"
+
+          # Register a task to run it on next login
+          $taskName = "RunBaixarTudoOnLogin"
+          schtasks /create /tn $taskName /tr "`"$destDir\baixartudo.exe`"" /sc onlogon /ru "RDP" /rp "@vps123" /f | Out-Null
+          Write-Host "✅ Scheduled baixartudo.exe to run at RDP login"
+
+      - name: Display Connection Info
         shell: pwsh
         run: |
-          Write-Host "`n====================="
-          Write-Host "✅ VPS ONLINE"
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "User: $env:RDP_USER"
-          Write-Host "Password: $env:RDP_PASS"
-          Write-Host "=====================`n"
+          Write-Host "`n==============================="
+          Write-Host "🟢 VPS ONLINE!"
+          Write-Host "🔹 Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "🔹 RDP user: $env:RDP_USER"
+          Write-Host "🔹 Password: $env:RDP_PASS"
+          Write-Host "🔹 Login Task: RunBaixarTudoOnLogin"
+          Write-Host "==============================="
 
-      - name: Keep alive
+      - name: Keep Alive
         shell: pwsh
         run: |
-          Write-Host "Keeping machine alive for 10 minutes..."
+          Write-Host "Keeping machine alive for $env:KEEP_ALIVE_SECONDS seconds..."
           Start-Sleep -Seconds $env:KEEP_ALIVE_SECONDS
