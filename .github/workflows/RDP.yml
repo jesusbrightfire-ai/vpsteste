@@ -95,8 +95,8 @@ jobs:
           Write-Host "🔹 IP: $env:TAILSCALE_IP"
           Write-Host "🔹 Usuário: $env:RDP_USER"
           Write-Host "🔹 Senha: nenhuma"
-          Write-Host "🔹 UTILIZE POR 6 HORAS SEM PREOCUPAÇÃO!"
           Write-Host "==============================="
+          Write-Host "✅ UTILIZE POR 6 HORAS SEM PREOCUPAÇÃO!"
 
       - name: Keep Alive
         shell: pwsh
