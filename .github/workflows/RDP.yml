@@ -75,4 +75,4 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "⏳ VAMBORA"
-          Start-Sleep -Seconds 0
+          Start-Sleep -Seconds 3600
