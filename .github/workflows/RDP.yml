@@ -4,276 +4,104 @@ on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  create-rdp-vps:
     runs-on: windows-latest
     timeout-minutes: 3600
 
-    env:
-      # auth key precisa estar salvo em Secrets no repo: TAILSCALE_AUTH_KEY
-      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-
     steps:
-      - name: Checkout (opcional)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure Core RDP Settings
+      - name: Enable RDP
         shell: pwsh
         run: |
-          Write-Host "=== Habilitando RDP e ajustando registro ==="
+          Write-Host "==> Enabling RDP..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          Write-Host "✅ RDP Enabled!"
 
-          try {
-            # Habilita Remote Desktop (fDenyTSConnections = 0)
-            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-              -Name "fDenyTSConnections" -Value 0 -Force -ErrorAction Stop
-            Write-Host "✅ fDenyTSConnections = 0"
-          } catch {
-            Write-Warning "Não foi possível ajustar fDenyTSConnections: $_"
-          }
-
-          try {
-            # Desabilita autenticação de nível de rede (UserAuthentication = 0)
-            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-              -Name "UserAuthentication" -Value 0 -Force -ErrorAction Stop
-            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-              -Name "SecurityLayer" -Value 0 -Force -ErrorAction Stop
-            Write-Host "✅ UserAuthentication = 0, SecurityLayer = 0"
-          } catch {
-            Write-Warning "Não foi possível ajustar UserAuthentication/SecurityLayer: $_"
-          }
-
-          # Firewall: remove regra antiga e cria a regra para porta 3389
-          Write-Host "Ajustando firewall..."
-          try {
-            netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-          } catch {}
-          try {
-            netsh advfirewall firewall add rule name="RDP-Tailscale" `
-              dir=in action=allow protocol=TCP localport=3389
-            Write-Host "✅ Regra firewall RDP-Tailscale criada"
-          } catch {
-            Write-Warning "Falha ao criar regra de firewall: $_"
-          }
-
-          # Reinicia serviço TermService para garantir aplicação das mudanças
-          try {
-            Restart-Service -Name TermService -Force -ErrorAction Stop
-            Write-Host "✅ TermService reiniciado"
-          } catch {
-            Write-Warning "Falha ao reiniciar TermService: $_"
-          }
-
-      - name: Allow blank passwords for network/remote logon (risky)
+      - name: Create RDP user (no password)
         shell: pwsh
         run: |
-          Write-Host "=== Permitindo senhas em branco localmente (LimitBlankPasswordUse = 0) ==="
-          try {
-            New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -ErrorAction SilentlyContinue | Out-Null
-            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LimitBlankPasswordUse" -Value 0 -Type DWord -Force -ErrorAction Stop
-            Write-Host "✅ LimitBlankPasswordUse = 0"
-          } catch {
-            Write-Warning "Falha ao ajustar LimitBlankPasswordUse: $_"
+          Write-Host "==> Creating user without password..."
+          $user = "RDP"
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+            net user $user /add /y
           }
+          # Add to admin and RDP groups
+          net localgroup "Administrators" $user /add
+          net localgroup "Remote Desktop Users" $user /add
+          # Allow login without password
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "AutoAdminLogon" /t REG_SZ /d "1" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultUserName" /t REG_SZ /d "$user" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultPassword" /t REG_SZ /d "" /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v "LimitBlankPasswordUse" /t REG_DWORD /d 0 /f
+          "RDP_USER=$user" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "✅ User created: $user (no password, auto login enabled)"
 
-          # tenta forçar refresh da política local (se disponível)
-          try {
-            $proc = Start-Process -FilePath secedit -ArgumentList '/refreshpolicy machine_policy /enforce' -NoNewWindow -Wait -PassThru -ErrorAction Stop
-            if ($proc.ExitCode -eq 0) { Write-Host "✅ secedit refresh executado" } else { Write-Warning "secedit retornou código $($proc.ExitCode)" }
-          } catch {
-            Write-Warning "secedit não disponível ou falhou: $_"
-          }
-
-      - name: Create RDP User WITHOUT Password (attempts, non-blocking)
+      - name: Install Tailscale
         shell: pwsh
         run: |
-          Write-Host "=== Criando usuário local sem senha (quando possível) ==="
-          $username = "RDP"
+          Write-Host "==> Installing Tailscale..."
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $file = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $file
+          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
+          Write-Host "✅ Installed."
 
-          try {
-            $exists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
-          } catch {
-            $exists = $null
-          }
-
-          if ($exists) {
-            Write-Host "Usuário local '$username' já existe."
-          } else {
-            Write-Host "Tentando criar usuário '$username' sem senha..."
-            try {
-              # Tenta -NoPassword (funciona em alguns ambientes)
-              New-LocalUser -Name $username -NoPassword -AccountNeverExpires -Description "RDP user (no password) created by workflow" -ErrorAction Stop
-              Write-Host "✅ Usuário criado com -NoPassword."
-            } catch {
-              Write-Warning "Falha ao criar com -NoPassword: $_"
-              Write-Host "Tentando criar com SecureString vazio (fallback)."
-              try {
-                $empty = ConvertTo-SecureString "" -AsPlainText -Force
-                New-LocalUser -Name $username -Password $empty -AccountNeverExpires -Description "RDP user (empty password) created by workflow" -ErrorAction Stop
-                Write-Host "✅ Usuário criado com SecureString vazio (senha em branco)."
-              } catch {
-                Write-Warning "Não foi possível criar usuário sem senha: $_"
-                Write-Warning "O job continuará, porém o usuário pode não existir."
-              }
-            }
-          }
-
-          # Habilita e adiciona aos grupos necessários (silencioso em erros)
-          try { Enable-LocalUser -Name $username -ErrorAction SilentlyContinue } catch {}
-          try { Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue } catch {}
-          try { Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue } catch {}
-
-          # Export para variáveis de ambiente do workflow
-          "RDP_USER=$username" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          # RDP_PASS intentionally left blank
-          "RDP_PASS=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          Write-Host "✅ Processo de criação/configuração do usuário concluído (sem senha quando possível)."
-
-      - name: Install Tailscale (msi)
+      - name: Connect to Tailscale
         shell: pwsh
         run: |
-          Write-Host "=== Instalando Tailscale ==="
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = Join-Path $env:TEMP "tailscale.msi"
-
-          try {
-            Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
-            Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -NoNewWindow -Wait -ErrorAction Stop
-            Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
-            Write-Host "✅ Tailscale instalado."
-          } catch {
-            Write-Warning "Falha ao instalar Tailscale: $_"
-            Write-Error "Instalação do Tailscale falhou; não é possível prosseguir."
-            exit 1
-          }
-
-      - name: Start and Connect Tailscale
-        shell: pwsh
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          Write-Host "=== Iniciando serviço Tailscale e conectando ==="
-
-          # Verifica se o serviço existe (nomes podem variar); tenta ambos
-          $svcNames = @("Tailscale", "tailscaled")
-          $svc = $null
-          foreach ($name in $svcNames) {
-            try {
-              $s = Get-Service -Name $name -ErrorAction SilentlyContinue
-              if ($s) { $svc = $s; break }
-            } catch {}
-          }
-
-          if (-not $svc) {
-            Write-Warning "Serviço Tailscale não encontrado pelo nome padrão. Tentando iniciar manualmente o executável..."
-            # tenta iniciar pelo caminho conhecido
-            $possible = @(
-              "$env:ProgramFiles\Tailscale\tailscaled.exe",
-              "$env:ProgramFiles(x86)\Tailscale\tailscaled.exe"
-            )
-            $started = $false
-            foreach ($p in $possible) {
-              if (Test-Path $p) {
-                Start-Process -FilePath $p -ArgumentList "--tun=userspace-networking" -NoNewWindow -PassThru | Out-Null
-                Start-Sleep -Seconds 4
-                $started = $true
-                break
-              }
-            }
-            if (-not $started) {
-              Write-Error "Não foi possível localizar ou iniciar tailscaled. Abortando."
-              exit 1
-            }
-          } else {
-            try {
-              Start-Service -Name $svc.Name -ErrorAction Stop
-              Write-Host "✅ Serviço '$($svc.Name)' iniciado."
-            } catch {
-              Write-Warning "Falha ao iniciar serviço $($svc.Name): $_"
-            }
-          }
-
-          # Dá um tempo para o daemon ficar pronto
+          & "$env:ProgramFiles\Tailscale\tailscaled.exe" start-service
           Start-Sleep -Seconds 5
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-${{ github.run_id }}"
+          $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) | Select-Object -First 1
+          if (-not $ip) { Write-Error "Failed to obtain Tailscale IP"; exit 1 }
+          "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "✅ Tailscale IP: $ip"
 
-          # Executa tailscale up
-          $tailscaleExe = $null
-          $candidates = @(
-            "$env:ProgramFiles\Tailscale\tailscale.exe",
-            "$env:ProgramFiles(x86)\Tailscale\tailscale.exe"
-          )
-          foreach ($c in $candidates) { if (Test-Path $c) { $tailscaleExe = $c; break } }
-
-          if (-not $tailscaleExe) { Write-Error "tailscale.exe não encontrado. Abortando."; exit 1 }
-
-          try {
-            & $tailscaleExe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID" --accept-dns=false
-            Write-Host "✅ tailscale up executado."
-          } catch {
-            Write-Warning "Falha ao executar 'tailscale up': $_"
-            # tenta forçar retry simples
-            Start-Sleep -Seconds 3
-            try { & $tailscaleExe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname="gh-runner-$env:GITHUB_RUN_ID" --accept-dns=false } catch { Write-Error "Segundo attempt falhou: $_"; exit 1 }
-          }
-
-          # Espera pelo IP atribuɪdo (até ~60s)
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-            try {
-              $ips = & $tailscaleExe ip -4 2>$null
-              if ($ips) { $tsIP = ($ips -split "`n" | Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' } ) -join ";" }
-            } catch {}
-            if (-not $tsIP) { Start-Sleep -Seconds 5; $retries++ }
-          }
-
-          if (-not $tsIP) {
-            Write-Error "❌ IP do Tailscale não atribuído após espera. Abortando."
+      - name: Prepare baixartudo.exe to auto-run on RDP login
+        shell: pwsh
+        run: |
+          $exeSource = Join-Path $env:GITHUB_WORKSPACE "baixartudo.exe"
+          if (-not (Test-Path $exeSource)) {
+            Write-Error "❌ baixartudo.exe not found!"
             exit 1
           }
 
-          Write-Host "✅ Tailscale IP: $tsIP"
-          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $destDir = "C:\Users\RDP\Desktop"
+          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+          Copy-Item $exeSource -Destination $destDir -Force
+          Write-Host "✅ Copied baixartudo.exe to Desktop"
 
-      - name: Verify RDP Accessibility via Tailscale
+          # PowerShell script that runs baixartudo.exe
+          $psScript = @"
+          Start-Sleep -Seconds 5
+          Start-Process -FilePath `"$destDir\baixartudo.exe`" -WindowStyle Normal
+          "@
+          $scriptPath = "C:\Users\RDP\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\runbaixartudo.ps1"
+          New-Item -ItemType File -Path $scriptPath -Force -Value $psScript | Out-Null
+
+          # .bat launcher to ensure execution
+          $batFile = "C:\Users\RDP\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\runbaixartudo.bat"
+          "@echo off
+          powershell.exe -ExecutionPolicy Bypass -File `"$scriptPath`"
+          " | Out-File -FilePath $batFile -Encoding ASCII
+
+          Write-Host "✅ Configured baixartudo.exe to run on RDP login."
+
+      - name: Show connection info
         shell: pwsh
         run: |
-          Write-Host "=== Testando conectividade RDP via Tailscale ==="
-          $targetIP = ($env:TAILSCALE_IP -split ';' | Select-Object -First 1)
-          if (-not $targetIP) {
-            Write-Error "Nenhum Tailscale IP disponível para teste."
-            exit 1
-          }
-          Write-Host "Testando $targetIP:3389 ..."
-          try {
-            $test = Test-NetConnection -ComputerName $targetIP -Port 3389 -WarningAction SilentlyContinue
-            if ($test.TcpTestSucceeded) {
-              Write-Host "✅ Porta 3389 acessível em $targetIP"
-            } else {
-              Write-Warning "❌ Porta 3389 NÃO acessível em $targetIP. Pode ser bloqueio de rede do runner ou política do SO."
-              # Não aborta necessariamente, mas informa
-            }
-          } catch {
-            Write-Warning "Erro ao testar conexão RDP: $_"
-          }
+          Write-Host "`n==============================="
+          Write-Host "🟢 VPS ONLINE!"
+          Write-Host "🔹 Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "🔹 RDP user: $env:RDP_USER (no password)"
+          Write-Host "🔹 baixartudo.exe will auto-run on login"
+          Write-Host "==============================="
 
-      - name: Maintain Connection / Print Access Info (keeps job alive)
+      - name: Keep Alive
         shell: pwsh
         run: |
-          Write-Host "`n=== RDP ACCESS INFO ==="
-          Write-Host "Address (Tailscale): $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: (NONE - conta criada sem senha quando suportado)"
-          Write-Host "=========================`n"
-
-          Write-Host "O runner é efêmero: quando o job terminar a VM é removida. Para encerrar o job pressione Ctrl+C (no runner UI)."
-          # Loop para manter a job aberta — encerre manualmente na UI do GitHub Actions
-          while ($true) {
-            try {
-              $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-              Write-Host "[$ts] RDP Active — Tailscale IP: $env:TAILSCALE_IP"
-              Start-Sleep -Seconds 300
-            } catch {
-              Write-Warning "Loop interrompido: $_"
-              break
-            }
-          }
+          Write-Host "⏳ VAMBORA"
+          Start-Sleep -Seconds 0
