@@ -10,7 +10,6 @@ jobs:
 
     steps:
       - name: Configure Core RDP Settings
-        shell: pwsh
         run: |
           # Enable Remote Desktop and disable Network Level Authentication (if needed)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
@@ -30,46 +29,28 @@ jobs:
           # Restart Remote Desktop Service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User (no password / auto-login)
-        shell: pwsh
+      - name: Create RDP User with Fixed Password
         run: |
           $username = "RDP"
+          $passwordPlain = ""
+          $securePass = ConvertTo-SecureString $passwordPlain -AsPlainText -Force
 
-          # If user exists, try to ensure blank password; otherwise create with blank password.
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-            Write-Host "Local user '$username' already exists. Attempting to set blank password..."
-            try {
-              cmd.exe /c "net user $username \"\"" 2>$null
-            } catch {
-              Write-Host "Warning: could not set blank password via net user. Continuing..."
-            }
+            Write-Host "Local user '$username' already exists. Updating password..."
+            net user $username $passwordPlain
           } else {
-            Write-Host "Creating local user '$username' with blank password..."
-            cmd.exe /c "net user $username \"\" /add"
+            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "RDP user created by workflow"
           }
 
-          # Add to required groups
-          cmd.exe /c "net localgroup Administrators $username /add" 2>$null || Write-Host "Note: add to Administrators may have failed or already present."
-          cmd.exe /c "net localgroup \"Remote Desktop Users\" $username /add" 2>$null || Write-Host "Note: add to Remote Desktop Users may have failed or already present."
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
 
-          # Allow network logon with blank passwords
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v "LimitBlankPasswordUse" /t REG_DWORD /d 0 /f
-
-          # Configure AutoAdminLogon for automatic login (no password)
-          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "AutoAdminLogon" /t REG_SZ /d "1" /f
-          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultUserName" /t REG_SZ /d "$username" /f
-
-          # Explicitly set DefaultPassword to empty string (some systems expect the value)
-          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultPassword" /t REG_SZ /d "" /f
-
-          # Expose env vars (password intentionally blank)
           "RDP_USER=$username" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RDP_PASS=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RDP_PASS=$passwordPlain" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host "✅ User '$username' created/updated for auto-login with blank password (if host policy allows)."
+          Write-Host "✅ User '$username' configured and ready."
 
       - name: Install Tailscale
-        shell: pwsh
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
@@ -80,7 +61,6 @@ jobs:
           Write-Host "✅ Tailscale installed successfully."
 
       - name: Establish Tailscale Connection
-        shell: pwsh
         run: |
           Write-Host "Starting Tailscale service..."
           Start-Process -FilePath "$env:ProgramFiles\Tailscale\tailscaled.exe"
@@ -107,7 +87,6 @@ jobs:
           Write-Host "✅ Tailscale connected! IP: $tsIP"
 
       - name: Verify RDP Accessibility
-        shell: pwsh
         run: |
           Write-Host "Testing RDP connectivity..."
           $targetIP = $env:TAILSCALE_IP -split ';' | Select-Object -First 1
@@ -119,12 +98,11 @@ jobs:
           Write-Host "✅ RDP port reachable via Tailscale ($targetIP)."
 
       - name: Maintain Connection
-        shell: pwsh
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: (blank — auto-login enabled)"
+          Write-Host "Password: $env:RDP_PASS"
           Write-Host "==================`n"
 
           while ($true) {
