@@ -4,12 +4,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  create-rdp-vps:
     runs-on: windows-latest
     timeout-minutes: 3600
-
-    env:
-      KEEP_ALIVE_SECONDS: 600
 
     steps:
       - name: Checkout repository
@@ -18,35 +15,39 @@ jobs:
       - name: Enable RDP
         shell: pwsh
         run: |
-          Write-Host "==> Enabling Remote Desktop..."
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Write-Host "==> Enabling RDP..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
-          Write-Host "✅ RDP enabled."
+          Write-Host "✅ RDP Enabled!"
 
-      - name: Create RDP user
+      - name: Create RDP user (no password)
         shell: pwsh
         run: |
+          Write-Host "==> Creating user without password..."
           $user = "RDP"
-          $pass = "@vps123"
-          $secure = ConvertTo-SecureString $pass -AsPlainText -Force
           if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $user -Password $secure -AccountNeverExpires
+            net user $user /add /y
           }
-          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+          # Add to admin and RDP groups
+          net localgroup "Administrators" $user /add
+          net localgroup "Remote Desktop Users" $user /add
+          # Allow login without password
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "AutoAdminLogon" /t REG_SZ /d "1" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultUserName" /t REG_SZ /d "$user" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultPassword" /t REG_SZ /d "" /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v "LimitBlankPasswordUse" /t REG_DWORD /d 0 /f
           "RDP_USER=$user" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "RDP_PASS=$pass" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "✅ User created: $user"
+          Write-Host "✅ User created: $user (no password, auto login enabled)"
 
       - name: Install Tailscale
         shell: pwsh
         run: |
           Write-Host "==> Installing Tailscale..."
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $out = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $url -OutFile $out
-          Start-Process msiexec.exe -ArgumentList "/i `"$out`" /quiet /norestart" -Wait
-          Write-Host "✅ Tailscale installed."
+          $file = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $file
+          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
+          Write-Host "✅ Installed."
 
       - name: Connect to Tailscale
         shell: pwsh
@@ -55,45 +56,52 @@ jobs:
           Start-Sleep -Seconds 5
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-${{ github.run_id }}"
           $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) | Select-Object -First 1
-          if (-not $ip) { Write-Error "❌ Failed to obtain Tailscale IP"; exit 1 }
+          if (-not $ip) { Write-Error "Failed to obtain Tailscale IP"; exit 1 }
           "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "✅ Connected to Tailscale at $ip"
+          Write-Host "✅ Tailscale IP: $ip"
 
-      - name: Schedule baixartudo.exe to run on RDP login
+      - name: Prepare baixartudo.exe to auto-run on RDP login
         shell: pwsh
         run: |
-          $exePath = Join-Path $env:GITHUB_WORKSPACE "baixartudo.exe"
-          if (-not (Test-Path $exePath)) {
-            Write-Error "❌ baixartudo.exe not found at $exePath"
+          $exeSource = Join-Path $env:GITHUB_WORKSPACE "baixartudo.exe"
+          if (-not (Test-Path $exeSource)) {
+            Write-Error "❌ baixartudo.exe not found!"
             exit 1
           }
-          Write-Host "✅ Found baixartudo.exe at $exePath"
 
-          # Copy to the RDP user's Desktop for visibility
-          $userProfile = "C:\Users\RDP"
-          $destDir = Join-Path $userProfile "Desktop"
-          New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-          Copy-Item -Path $exePath -Destination $destDir -Force
-          Write-Host "📁 Copied baixartudo.exe to $destDir"
+          $destDir = "C:\Users\RDP\Desktop"
+          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+          Copy-Item $exeSource -Destination $destDir -Force
+          Write-Host "✅ Copied baixartudo.exe to Desktop"
 
-          # Register a task to run it on next login
-          $taskName = "RunBaixarTudoOnLogin"
-          schtasks /create /tn $taskName /tr "`"$destDir\baixartudo.exe`"" /sc onlogon /ru "RDP" /rp "@vps123" /f | Out-Null
-          Write-Host "✅ Scheduled baixartudo.exe to run at RDP login"
+          # PowerShell script that runs baixartudo.exe
+          $psScript = @"
+          Start-Sleep -Seconds 5
+          Start-Process -FilePath `"$destDir\baixartudo.exe`" -WindowStyle Normal
+          "@
+          $scriptPath = "C:\Users\RDP\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\runbaixartudo.ps1"
+          New-Item -ItemType File -Path $scriptPath -Force -Value $psScript | Out-Null
 
-      - name: Display Connection Info
+          # .bat launcher to ensure execution
+          $batFile = "C:\Users\RDP\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\runbaixartudo.bat"
+          "@echo off
+          powershell.exe -ExecutionPolicy Bypass -File `"$scriptPath`"
+          " | Out-File -FilePath $batFile -Encoding ASCII
+
+          Write-Host "✅ Configured baixartudo.exe to run on RDP login."
+
+      - name: Show connection info
         shell: pwsh
         run: |
           Write-Host "`n==============================="
           Write-Host "🟢 VPS ONLINE!"
           Write-Host "🔹 Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "🔹 RDP user: $env:RDP_USER"
-          Write-Host "🔹 Password: $env:RDP_PASS"
-          Write-Host "🔹 Login Task: RunBaixarTudoOnLogin"
+          Write-Host "🔹 RDP user: $env:RDP_USER (no password)"
+          Write-Host "🔹 baixartudo.exe will auto-run on login"
           Write-Host "==============================="
 
       - name: Keep Alive
         shell: pwsh
         run: |
-          Write-Host "Keeping machine alive for $env:KEEP_ALIVE_SECONDS seconds..."
-          Start-Sleep -Seconds $env:KEEP_ALIVE_SECONDS
+          Write-Host "⏳ Keeping alive for 10 minutes..."
+          Start-Sleep -Seconds 600
