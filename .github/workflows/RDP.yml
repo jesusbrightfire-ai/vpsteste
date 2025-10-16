@@ -68,7 +68,7 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
           Write-Host "✅ 7-Zip Installed."
 
-            - name: Download and extract files to RDP user
+      - name: Download and extract files to RDP user
         shell: pwsh
         run: |
           $rdpDesktop = "C:\Users\RDP\Desktop"
