@@ -93,19 +93,33 @@ jobs:
     steps:
       - name: Infinite Auto-Restart Loop
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          WORKFLOW_FILE: ${{ github.workflow }}
         run: |
           while ($true) {
             Write-Host "⏳ Aguardando antes de reiniciar..."
-            # altere: 60 para teste / 20400 (~5h40) para produção
+            # altere para 60 (teste) ou 20400 (~5h40) para produção
             Start-Sleep -Seconds 60
+
             Write-Host "🚀 Reiniciando workflow..."
+            $url = "https://api.github.com/repos/$env:REPO/actions/workflows/$env:WORKFLOW_FILE.yml/dispatches"
             $headers = @{
               "Accept" = "application/vnd.github+json"
-              "Authorization" = "Bearer $env:GITHUB_TOKEN"
+              "Authorization" = "Bearer $env:GH_TOKEN"
+              "Content-Type" = "application/json"
             }
             $body = @{
-              ref = "${{ github.ref }}"
+              ref = $env:BRANCH
             } | ConvertTo-Json
-            $workflowFile = "${{ github.workflow }}.yml"
-            Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$workflowFile/dispatches" -Method Post -Headers $headers -Body $body
+
+            try {
+              Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body
+              Write-Host "✅ Workflow reiniciado com sucesso!"
+            }
+            catch {
+              Write-Host "❌ Falha ao reiniciar: $($_.Exception.Message)"
+            }
           }
