@@ -89,7 +89,6 @@ jobs:
           }
 
   auto-restart:
-    needs: secure-rdp
     runs-on: windows-latest
     steps:
       - name: Infinite Auto-Restart Loop
@@ -97,7 +96,7 @@ jobs:
         run: |
           while ($true) {
             Write-Host "⏳ Aguardando antes de reiniciar..."
-            # use 60s para testes / 20400s (5h40min) em produção
+            # altere: 60 para teste / 20400 (~5h40) para produção
             Start-Sleep -Seconds 60
             Write-Host "🚀 Reiniciando workflow..."
             $headers = @{
