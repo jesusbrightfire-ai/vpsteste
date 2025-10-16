@@ -7,21 +7,21 @@ permissions:
   contents: write
   actions: write
 
+env:
+  # ==================================================
+  # 🕒 CONFIGURAÇÕES DE TEMPO (nível global)
+  # ==================================================
+  # Quantos segundos o RDP ficará ativo (ex: 60 = 1min, 20400 = 5h40min)
+  RDP_DURATION_SECONDS: 60
+  
+  # Quantos segundos o auto-restart deve esperar antes de reiniciar o workflow
+  RESTART_DELAY_SECONDS: 10
+  # ==================================================
+
 jobs:
   secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
-
-    env:
-      # ==================================================
-      # 🕒 CONFIGURAÇÕES DE TEMPO
-      # ==================================================
-      # Quantos segundos o RDP ficará ativo (ex: 60 = 1min, 20400 = 5h40min)
-      RDP_DURATION_SECONDS: 60
-      
-      # Quantos segundos o auto-restart deve esperar antes de reiniciar o workflow
-      RESTART_DELAY_SECONDS: 10
-      # ==================================================
 
     steps:
       - name: Configure Core RDP Settings
@@ -83,47 +83,4 @@ jobs:
 
       - name: Verify RDP Accessibility
         run: |
-          $targetIP = $env:TAILSCALE_IP -split ';' | Select-Object -First 1
-          $testResult = Test-NetConnection -ComputerName $targetIP -Port 3389 -WarningAction SilentlyContinue
-          if (-not $testResult.TcpTestSucceeded) { exit 1 }
-
-      - name: Maintain Connection
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: $env:RDP_PASS"
-          Write-Host "==================`n"
-
-          # Calcula o número de loops de 10 segundos para o total desejado
-          $totalSeconds = [int]$env:RDP_DURATION_SECONDS
-          $loops = [math]::Ceiling($totalSeconds / 10)
-
-          for ($i = 0; $i -lt $loops; $i++) {
-            Write-Host "[$(Get-Date)] RDP Active - Loop $i / $loops"
-            Start-Sleep -Seconds 10
-          }
-
-          Write-Host "🌀 Reiniciando workflow após $totalSeconds segundos de atividade..."
-          exit 0
-
-  auto-restart:
-    runs-on: windows-latest
-    steps:
-      - name: Infinite Auto-Restart Loop
-        shell: pwsh
-        run: |
-          while ($true) {
-            Write-Host "⏳ Aguardando antes de reiniciar..."
-            Start-Sleep -Seconds $env:RESTART_DELAY_SECONDS
-            Write-Host "🚀 Reiniciando workflow..."
-            $headers = @{
-              "Accept" = "application/vnd.github+json"
-              "Authorization" = "Bearer $env:GITHUB_TOKEN"
-            }
-            $body = @{
-              ref = "${{ github.ref }}"
-            } | ConvertTo-Json
-            $workflowFile = "${{ github.workflow }}.yml"
-            Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$workflowFile/dispatches" -Method Post -Headers $headers -Body $body
-          }
+          $ta
