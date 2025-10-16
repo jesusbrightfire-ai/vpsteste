@@ -68,11 +68,11 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
           Write-Host "✅ 7-Zip Installed."
 
-      - name: Download and extract files to RDP user
+      - name: Download and extract files to Public Desktop
         shell: pwsh
         run: |
-          $rdpDesktop = "C:\Users\RDP\Desktop"
-          if (-not (Test-Path $rdpDesktop)) { New-Item -ItemType Directory -Path $rdpDesktop -Force }
+          $publicDesktop = "C:\Users\Public\Desktop"
+          if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force }
 
           $url = "https://www.dropbox.com/scl/fi/qy9evq8pj3fyvq4e77j8c/arquivos_extraidos.zip?rlkey=762hqioz27j68i26pgfi4cr6d&st=pl5dltbr&dl=1"
           $zipPath = "$env:TEMP\arquivos_extraidos.zip"
@@ -81,11 +81,11 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
           Start-Sleep -Seconds 2
 
-          Write-Host "==> Extracting files to RDP desktop..."
+          Write-Host "==> Extracting files to Public Desktop..."
           $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
-          & $sevenZip x $zipPath -o"$rdpDesktop" -y
+          & $sevenZip x $zipPath -o"$publicDesktop" -y
 
-          Write-Host "✅ Files extracted to RDP Desktop!"
+          Write-Host "✅ Files extracted to Public Desktop!"
 
       - name: Show connection info
         shell: pwsh
