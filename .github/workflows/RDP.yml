@@ -1,4 +1,4 @@
-name: PEDRO-RDP
+name: RDP
 
 on:
   workflow_dispatch:
@@ -8,88 +8,85 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 3600
 
-    env:
-      # tempo para manter o runner ativo (em segundos)
-      KEEP_ALIVE_SECONDS: 0
-
     steps:
       - name: Configure Core RDP Settings
         shell: pwsh
         run: |
-          Write-Host "==> Enabling Remote Desktop & firewall rule..."
-          # Enable Remote Desktop
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" -Value 0 -Force
-
-          # Optional: disable NLA if needed
+                             -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" -Value 0 -Force
+                             -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "SecurityLayer" -Value 0 -Force
+                             -Name "SecurityLayer" -Value 0 -Force
 
-          # Firewall rule for RDP
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null || Write-Host "no existing rule"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "no existing rule"
 
-          # Restart RDP service
+          # Allow incoming RDP on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # Restart Remote Desktop Service to ensure changes take effect
           Restart-Service -Name TermService -Force
-          Write-Host "✅ RDP enabled."
 
-      - name: Create RDP user (no password) and allow blank passwords
+      - name: Create RDP User (no password / auto-login)
         shell: pwsh
         run: |
-          Write-Host "==> Creating user RDP without password and enabling auto-login settings..."
+          $username = "RDP"
 
-          $user = "RDP"
-
-          # Create user with blank password (Windows 'net user username "" /add')
-          if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
-            Write-Host "User $user already exists. Ensuring blank password."
-            # Set blank password via net user (may fail if policy forbids)
-            net user $user "" 2>$null || Write-Host "Could not set blank password via 'net user', continuing..."
+          # If user exists, try to ensure blank password; otherwise create with blank password.
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+            Write-Host "Local user '$username' already exists. Attempting to set blank password..."
+            try {
+              cmd.exe /c "net user $username \"\"" 2>$null
+            } catch {
+              Write-Host "Warning: could not set blank password via net user. Continuing..."
+            }
           } else {
-            # Create user with blank password
-            cmd.exe /c "net user $user \"\" /add"
+            Write-Host "Creating local user '$username' with blank password..."
+            cmd.exe /c "net user $username \"\" /add"
           }
 
-          # Add to Administrators and Remote Desktop Users groups
-          cmd.exe /c "net localgroup Administrators $user /add" 2>$null || Write-Host "Add to Administrators may have failed or already present."
-          cmd.exe /c "net localgroup \"Remote Desktop Users\" $user /add" 2>$null || Write-Host "Add to Remote Desktop Users may have failed or already present."
+          # Add to required groups
+          cmd.exe /c "net localgroup Administrators $username /add" 2>$null || Write-Host "Note: add to Administrators may have failed or already present."
+          cmd.exe /c "net localgroup \"Remote Desktop Users\" $username /add" 2>$null || Write-Host "Note: add to Remote Desktop Users may have failed or already present."
 
-          # Allow blank passwords for network logon (required to permit remote logon with blank pwd)
-          # Set LimitBlankPasswordUse = 0
+          # Allow network logon with blank passwords
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v "LimitBlankPasswordUse" /t REG_DWORD /d 0 /f
 
-          # Configure AutoAdminLogon to automatically log in the user (auto logon)
+          # Configure AutoAdminLogon for automatic login (no password)
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "AutoAdminLogon" /t REG_SZ /d "1" /f
-          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultUserName" /t REG_SZ /d "$user" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultUserName" /t REG_SZ /d "$username" /f
 
-          # Set DefaultPassword to empty string (explicit) — AutoAdminLogon may require the key; set as empty.
+          # Explicitly set DefaultPassword to empty string (some systems expect the value)
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultPassword" /t REG_SZ /d "" /f
 
-          # In some hosted images the Winlogon keys live under HKLM\SOFTWARE\Wow6432Node\... not typical; above is standard.
-          # Expose env variables for later steps/logs:
-          "RDP_USER=$user" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Expose env vars (password intentionally blank)
+          "RDP_USER=$username" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RDP_PASS=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host "✅ User $user created/updated (blank password). Auto logon configured."
+          Write-Host "✅ User '$username' created/updated for auto-login with blank password (if host policy allows)."
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          Write-Host "==> Installing Tailscale..."
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
+
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
-          Write-Host "✅ Tailscale installed."
+          Write-Host "✅ Tailscale installed successfully."
 
       - name: Establish Tailscale Connection
         shell: pwsh
         run: |
-          Write-Host "==> Starting tailscaled and connecting to Tailscale..."
+          Write-Host "Starting Tailscale service..."
           Start-Process -FilePath "$env:ProgramFiles\Tailscale\tailscaled.exe"
           Start-Sleep -Seconds 5
+
+          Write-Host "Connecting to Tailscale..."
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$env:GITHUB_RUN_ID" --accept-dns=false
 
           $tsIP = $null
@@ -112,7 +109,7 @@ jobs:
       - name: Verify RDP Accessibility
         shell: pwsh
         run: |
-          Write-Host "==> Testing RDP connectivity via Tailscale..."
+          Write-Host "Testing RDP connectivity..."
           $targetIP = $env:TAILSCALE_IP -split ';' | Select-Object -First 1
           $testResult = Test-NetConnection -ComputerName $targetIP -Port 3389 -WarningAction SilentlyContinue
           if (-not $testResult.TcpTestSucceeded) {
@@ -121,7 +118,7 @@ jobs:
           }
           Write-Host "✅ RDP port reachable via Tailscale ($targetIP)."
 
-      - name: Maintain Connection (keep alive)
+      - name: Maintain Connection
         shell: pwsh
         run: |
           Write-Host "`n=== RDP ACCESS ==="
@@ -130,10 +127,7 @@ jobs:
           Write-Host "Password: (blank — auto-login enabled)"
           Write-Host "==================`n"
 
-          $t = 600
-          for ($i = 0; $i -lt ($t/60); $i++) {
-            Write-Host "[$(Get-Date)] RDP Active - minute $($i+1) / $($t/60)"
-            Start-Sleep -Seconds 60
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
           }
-
-          Write-Host "Keep-alive finished. Workflow will exit."
