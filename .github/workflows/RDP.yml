@@ -91,35 +91,46 @@ jobs:
   auto-restart:
     runs-on: windows-latest
     steps:
-      - name: Infinite Auto-Restart Loop
+      - name: Controlled Auto-Restart Loop (Single Instance)
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
+          RUN_ID: ${{ github.run_id }}
           WORKFLOW_FILE: ${{ github.workflow }}
         run: |
           while ($true) {
             Write-Host "⏳ Aguardando antes de reiniciar..."
-            # altere para 60 (teste) ou 20400 (~5h40) para produção
+            # tempo de espera — ajuste para 60 (teste) ou 20400 (~5h40) em produção
             Start-Sleep -Seconds 60
 
-            Write-Host "🚀 Reiniciando workflow..."
-            $url = "https://api.github.com/repos/$env:REPO/actions/workflows/$env:WORKFLOW_FILE.yml/dispatches"
+            Write-Host "🛑 Cancelando execução atual..."
+            $cancelUrl = "https://api.github.com/repos/$env:REPO/actions/runs/$env:RUN_ID/cancel"
             $headers = @{
               "Accept" = "application/vnd.github+json"
               "Authorization" = "Bearer $env:GH_TOKEN"
-              "Content-Type" = "application/json"
             }
-            $body = @{
-              ref = $env:BRANCH
-            } | ConvertTo-Json
-
             try {
-              Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body
-              Write-Host "✅ Workflow reiniciado com sucesso!"
+              Invoke-RestMethod -Uri $cancelUrl -Method Post -Headers $headers
+              Write-Host "✅ Execução cancelada com sucesso."
+            } catch {
+              Write-Host "⚠️ Falha ao cancelar execução: $($_.Exception.Message)"
             }
-            catch {
+
+            Start-Sleep -Seconds 10
+
+            Write-Host "🚀 Reiniciando workflow..."
+            $dispatchUrl = "https://api.github.com/repos/$env:REPO/actions/workflows/$env:WORKFLOW_FILE.yml/dispatches"
+            $body = @{ ref = $env:BRANCH } | ConvertTo-Json
+            try {
+              Invoke-RestMethod -Uri $dispatchUrl -Method Post -Headers @{
+                "Accept" = "application/vnd.github+json"
+                "Authorization" = "Bearer $env:GH_TOKEN"
+                "Content-Type" = "application/json"
+              } -Body $body
+              Write-Host "✅ Workflow reiniciado com sucesso!"
+            } catch {
               Write-Host "❌ Falha ao reiniciar: $($_.Exception.Message)"
             }
           }
