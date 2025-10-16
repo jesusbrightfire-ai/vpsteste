@@ -1,19 +1,7 @@
-name: RDP
+name: RDP + AnyDesk VPS
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
-  actions: write
-
-env:
-  # ==================================================
-  # 🕒 CONFIGURAÇÕES DE TEMPO
-  # ==================================================
-  RDP_DURATION_SECONDS: 60        # Tempo de sessão ativa (60s = 1 min)
-  RESTART_DELAY_SECONDS: 10       # Atraso antes do reinício (10s)
-  # ==================================================
 
 jobs:
   secure-rdp:
@@ -21,20 +9,23 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Configure Core RDP Settings
+      # ====================================================
+      # 🔧 CONFIGURAÇÃO BÁSICA DE RDP
+      # ====================================================
+      - name: Enable Remote Desktop
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                           -Name "fDenyTSConnections" -Value 0 -Force
+                            -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "UserAuthentication" -Value 0 -Force
+                            -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "SecurityLayer" -Value 0 -Force
+                            -Name "SecurityLayer" -Value 0 -Force
 
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "no existing rule"
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "No existing rule"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Fixed Password
+      - name: Create RDP User
         run: |
           $username = "RDP"
           $passwordPlain = "@vps123"
@@ -43,7 +34,7 @@ jobs:
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
             net user $username $passwordPlain
           } else {
-            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "RDP user created by workflow"
+            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
           }
 
           Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
@@ -51,7 +42,11 @@ jobs:
 
           "RDP_USER=$username" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RDP_PASS=$passwordPlain" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "✅ User $username created."
 
+      # ====================================================
+      # 🌐 TAILSCALE (VPN)
+      # ====================================================
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -59,13 +54,14 @@ jobs:
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
+          Write-Host "✅ Tailscale installed."
 
-      - name: Establish Tailscale Connection
+      - name: Connect to Tailscale
         run: |
           Start-Process -FilePath "$env:ProgramFiles\Tailscale\tailscaled.exe"
           Start-Sleep -Seconds 5
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$env:GITHUB_RUN_ID" --accept-dns=false
-
+          
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 12) {
@@ -75,42 +71,71 @@ jobs:
             $retries++
           }
 
-          if (-not $tsIP) { exit 1 }
+          if (-not $tsIP) { Write-Error "❌ Tailscale IP not found"; exit 1 }
+
           "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "✅ Connected to Tailscale IP: $tsIP"
 
-      - name: Show RDP Access Info
+      # ====================================================
+      # 💻 ANYDESK - Instalação e Configuração
+      # ====================================================
+      - name: Install AnyDesk
+        shell: pwsh
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: $env:RDP_PASS"
-          Write-Host "==================`n"
+          $msiUrl = "https://download.anydesk.com/AnyDesk.msi"
+          $installer = "$env:TEMP\AnyDesk.msi"
+          Write-Host "Downloading AnyDesk..."
+          Invoke-WebRequest -Uri $msiUrl -OutFile $installer -UseBasicParsing
+          Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installer`" /qn /norestart" -Wait
+          Remove-Item $installer -Force
+          Write-Host "✅ AnyDesk installed."
 
-      - name: Keep RDP Active and Auto-Restart
+      - name: Configure AnyDesk Unattended Access
+        shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          ANYDESK_PASS: ${{ secrets.ANYDESK_PASS }}
         run: |
-          $duration = [int]$env:RDP_DURATION_SECONDS
-          $loops = [math]::Ceiling($duration / 10)
+          $paths = @(
+            "${env:ProgramFiles(x86)}\AnyDesk\AnyDesk.exe",
+            "${env:ProgramFiles}\AnyDesk\AnyDesk.exe"
+          )
+          $anydesk = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $anydesk) { throw "❌ AnyDesk executable not found!" }
 
-          for ($i = 1; $i -le $loops; $i++) {
-            Write-Host "[$(Get-Date)] RDP ativo... ($i/$loops)"
-            Start-Sleep -Seconds 10
+          Write-Host "Configuring AnyDesk Unattended Access..."
+          # Aplica a senha (se suportado)
+          echo $env:ANYDESK_PASS | & "$anydesk" --set-password _unattended_access
+          Start-Sleep -Seconds 3
+
+          # Pega o ID
+          $id = (& "$anydesk" --get-id) -join "" | ForEach-Object { $_.Trim() }
+          if (-not $id) { throw "❌ Could not read AnyDesk ID." }
+
+          "ANYDESK_ID=$id" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "✅ AnyDesk ID: $id"
+
+      # ====================================================
+      # ✅ EXIBIÇÃO FINAL
+      # ====================================================
+      - name: Display Connection Info
+        shell: pwsh
+        run: |
+          Write-Host "`n==============================="
+          Write-Host "🟢 VPS READY!"
+          Write-Host "🔹 RDP via Tailscale:"
+          Write-Host "   IP: $env:TAILSCALE_IP"
+          Write-Host "   User: $env:RDP_USER"
+          Write-Host "   Pass: $env:RDP_PASS"
+          Write-Host ""
+          Write-Host "🔹 AnyDesk Access:"
+          Write-Host "   ID: $env:ANYDESK_ID"
+          Write-Host "   Pass: (secret in ANYDESK_PASS)"
+          Write-Host "==============================="
+
+      - name: Keep Machine Alive
+        run: |
+          Write-Host "Keeping VPS alive... (Press stop in Actions to end)"
+          while ($true) {
+            Write-Host "[$(Get-Date)] VPS online..."
+            Start-Sleep -Seconds 300
           }
-
-          Write-Host "🌀 Tempo expirou. Reiniciando workflow em $env:RESTART_DELAY_SECONDS segundos..."
-          Start-Sleep -Seconds $env:RESTART_DELAY_SECONDS
-
-          Write-Host "🚀 Reenviando workflow..."
-          $headers = @{
-            "Accept" = "application/vnd.github+json"
-            "Authorization" = "Bearer $env:GH_TOKEN"
-          }
-          $body = @{
-            ref = "${{ github.ref }}"
-          } | ConvertTo-Json
-          $workflowFile = "${{ github.workflow }}.yml"
-
-          $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$workflowFile/dispatches"
-          Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
-          Write-Host "✅ Workflow reiniciado com sucesso!"
