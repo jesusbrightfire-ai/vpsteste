@@ -9,155 +9,75 @@ jobs:
     timeout-minutes: 3600
 
     env:
-      # quanto tempo manter o runner ativo após rodar o exe (em segundos)
       KEEP_ALIVE_SECONDS: 600
 
     steps:
-      - name: Checkout repository (to access executables)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure Core RDP Settings
+      - name: Enable RDP
         shell: pwsh
         run: |
-          Write-Host "==> Enabling Remote Desktop and adjusting settings..."
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "SecurityLayer" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
 
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "no existing rule"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-
-          Restart-Service -Name TermService -Force
-          Write-Host "✅ RDP configured."
-
-      - name: Create RDP User with Fixed Password
+      - name: Create user
         shell: pwsh
         run: |
-          $username = "RDP"
-          $passwordPlain = "@vps123"
-          $securePass = ConvertTo-SecureString $passwordPlain -AsPlainText -Force
-
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-            Write-Host "Local user '$username' already exists. Updating password..."
-            net user $username $passwordPlain
-          } else {
-            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "RDP user created by workflow"
+          $user = "RDP"
+          $pass = "@vps123"
+          $secure = ConvertTo-SecureString $pass -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $user -Password $secure -AccountNeverExpires
           }
-
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-
-          "RDP_USER=$username" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RDP_PASS=$passwordPlain" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          Write-Host "✅ User '$username' configured and ready."
+          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+          "RDP_USER=$user" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RDP_PASS=$pass" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          Write-Host "==> Downloading & installing Tailscale..."
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-          Write-Host "✅ Tailscale installed."
+          Write-Host "Installing Tailscale..."
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $out = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$out`"", "/quiet", "/norestart" -Wait
 
-      - name: Establish Tailscale Connection
+      - name: Connect to Tailscale
         shell: pwsh
         run: |
-          Write-Host "==> Starting tailscaled and bringing up tailscale..."
-          Start-Process -FilePath "$env:ProgramFiles\Tailscale\tailscaled.exe"
+          & "$env:ProgramFiles\Tailscale\tailscaled.exe" start-service
           Start-Sleep -Seconds 5
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-${{ github.run_id }}"
+          $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) | Select-Object -First 1
+          "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Connected with IP: $ip"
 
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$env:GITHUB_RUN_ID" --accept-dns=false
-
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) -join ";"
-              if ($tsIP) { break }
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-
-          if (-not $tsIP) {
-            Write-Error "❌ Tailscale IP not assigned. Exiting."
-            exit 1
-          }
-
-          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "✅ Tailscale connected! IP: $tsIP"
-
-      - name: Verify RDP Accessibility
+      - name: Run baixartudo.exe
         shell: pwsh
         run: |
-          Write-Host "==> Testing RDP connectivity via Tailscale..."
-          $targetIP = $env:TAILSCALE_IP -split ';' | Select-Object -First 1
-          $testResult = Test-NetConnection -ComputerName $targetIP -Port 3389 -WarningAction SilentlyContinue
-          if (-not $testResult.TcpTestSucceeded) {
-            Write-Error "❌ TCP connection to RDP port 3389 failed (Target: $targetIP)"
+          $exePath = Join-Path $env:GITHUB_WORKSPACE "baixartudo.exe"
+          if (-not (Test-Path $exePath)) {
+            Write-Error "❌ baixartudo.exe not found at $exePath"
             exit 1
           }
-          Write-Host "✅ RDP port reachable via Tailscale ($targetIP)."
+          Write-Host "✅ Found baixartudo.exe at $exePath"
+          Start-Process -FilePath $exePath -Wait -NoNewWindow
+          Write-Host "✅ baixartudo.exe finished successfully."
 
-      - name: Find baixartudo.exe (debug)
+      - name: Show connection info
         shell: pwsh
         run: |
-          Write-Host "Searching repository for 'baixartudo.exe' under $env:GITHUB_WORKSPACE ..."
-          $found = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter 'baixartudo.exe' -File -ErrorAction SilentlyContinue
-          if ($found) {
-            Write-Host "✅ Found the following matches:"
-            $found | ForEach-Object { Write-Host " - $($_.FullName)" }
-            # expose first match to env
-            $first = $found | Select-Object -First 1
-            "BAIXA_PATH=$($first.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          } else {
-            Write-Warning "❌ 'baixartudo.exe' not found in repository workspace. Listing top-level files for debug..."
-            Get-ChildItem -Path $env:GITHUB_WORKSPACE -Force -Depth 1 | ForEach-Object { Write-Host $_.FullName }
-            exit 1
-          }
-
-      - name: Run baixartudo.exe (from repo)
-        shell: pwsh
-        run: |
-          if (-not $env:BAIXA_PATH) { Write-Error "BAIXA_PATH not set. Aborting."; exit 1 }
-          $src = $env:BAIXA_PATH
-          $dest = Join-Path $env:TEMP (Split-Path $src -Leaf)
-          Copy-Item -Path $src -Destination $dest -Force
-          Write-Host "Starting $dest ..."
-          try {
-            Start-Process -FilePath $dest -ArgumentList @() -Wait -NoNewWindow -ErrorAction Stop
-            Write-Host "✅ baixartudo.exe finished successfully."
-          } catch {
-            Write-Error "❌ Error running baixartudo.exe: $($_.Exception.Message)"
-            exit 1
-          }
-
-      - name: Display Connection Info
-        shell: pwsh
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address (Tailscale): $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USER"
+          Write-Host "`n====================="
+          Write-Host "✅ VPS ONLINE"
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "User: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
-          Write-Host "==================`n"
+          Write-Host "=====================`n"
 
-      - name: Keep Machine Alive (so you can connect)
+      - name: Keep alive
         shell: pwsh
         run: |
-          $t = [int]$env:KEEP_ALIVE_SECONDS
-          if ($t -le 0) {
-            Write-Host "KEEP_ALIVE_SECONDS <= 0 → exiting immediately."
-            exit 0
-          }
-          Write-Host "Keeping runner alive for $t seconds. Stop the workflow in Actions page to terminate early."
-          $minutes = [math]::Ceiling($t / 60)
-          for ($i = 0; $i -lt $minutes; $i++) {
-            Write-Host "[$(Get-Date)] VPS online... (minute $($i+1)/$minutes)"
-            Start-Sleep -Seconds 60
-          }
-          Write-Host "Keep-alive finished. Workflow will complete."
+          Write-Host "Keeping machine alive for 10 minutes..."
+          Start-Sleep -Seconds $env:KEEP_ALIVE_SECONDS
