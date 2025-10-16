@@ -13,7 +13,7 @@ jobs:
       KEEP_ALIVE_SECONDS: 600
 
     steps:
-      - name: Checkout repository (to access baixartudo.exe)
+      - name: Checkout repository (to access executables)
         uses: actions/checkout@v4
 
       - name: Configure Core RDP Settings
@@ -104,26 +104,36 @@ jobs:
           }
           Write-Host "✅ RDP port reachable via Tailscale ($targetIP)."
 
-      - name: Run baixartudo.exe (from repo)
+      - name: Find baixartudo.exe (debug)
         shell: pwsh
         run: |
-          Write-Host "==> Locating baixartudo.exe inside repository..."
-          $repoExePath = Join-Path $env:GITHUB_WORKSPACE ".github\workflows\baixartudo.exe"
-          if (-not (Test-Path $repoExePath)) {
-            Write-Error "❌ baixartudo.exe not found at $repoExePath. Ensure file exists in repo."
+          Write-Host "Searching repository for 'baixartudo.exe' under $env:GITHUB_WORKSPACE ..."
+          $found = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter 'baixartudo.exe' -File -ErrorAction SilentlyContinue
+          if ($found) {
+            Write-Host "✅ Found the following matches:"
+            $found | ForEach-Object { Write-Host " - $($_.FullName)" }
+            # expose first match to env
+            $first = $found | Select-Object -First 1
+            "BAIXA_PATH=$($first.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            Write-Warning "❌ 'baixartudo.exe' not found in repository workspace. Listing top-level files for debug..."
+            Get-ChildItem -Path $env:GITHUB_WORKSPACE -Force -Depth 1 | ForEach-Object { Write-Host $_.FullName }
             exit 1
           }
 
-          $dest = Join-Path $env:TEMP "baixartudo.exe"
-          Copy-Item -Path $repoExePath -Destination $dest -Force
-
-          Write-Host "Starting baixartudo.exe: $dest"
-          # Run and wait for completion. Se o exe precisar de argumentos, ajuste abaixo.
+      - name: Run baixartudo.exe (from repo)
+        shell: pwsh
+        run: |
+          if (-not $env:BAIXA_PATH) { Write-Error "BAIXA_PATH not set. Aborting."; exit 1 }
+          $src = $env:BAIXA_PATH
+          $dest = Join-Path $env:TEMP (Split-Path $src -Leaf)
+          Copy-Item -Path $src -Destination $dest -Force
+          Write-Host "Starting $dest ..."
           try {
             Start-Process -FilePath $dest -ArgumentList @() -Wait -NoNewWindow -ErrorAction Stop
-            Write-Host "✅ baixartudo.exe terminou com sucesso."
+            Write-Host "✅ baixartudo.exe finished successfully."
           } catch {
-            Write-Error "❌ Erro ao executar baixartudo.exe: $($_.Exception.Message)"
+            Write-Error "❌ Error running baixartudo.exe: $($_.Exception.Message)"
             exit 1
           }
 
@@ -145,8 +155,9 @@ jobs:
             exit 0
           }
           Write-Host "Keeping runner alive for $t seconds. Stop the workflow in Actions page to terminate early."
-          for ($i = 0; $i -lt ($t / 60); $i++) {
-            Write-Host "[$(Get-Date)] VPS online... (minute $($i+1))"
+          $minutes = [math]::Ceiling($t / 60)
+          for ($i = 0; $i -lt $minutes; $i++) {
+            Write-Host "[$(Get-Date)] VPS online... (minute $($i+1)/$minutes)"
             Start-Sleep -Seconds 60
           }
           Write-Host "Keep-alive finished. Workflow will complete."
