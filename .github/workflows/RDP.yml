@@ -1,115 +1,77 @@
-name: RDP
+name: Secure RDP Access
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-  actions: write
-
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 90
 
     steps:
-      - name: Configure Core RDP Settings
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" || Write-Host "no existing rule"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Fixed Password
-        run: |
-          $username = "RDP"
-          $passwordPlain = "@vps123"
-          $securePass = ConvertTo-SecureString $passwordPlain -AsPlainText -Force
-
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-            net user $username $passwordPlain
-          } else {
-            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "RDP user created by workflow"
-          }
-
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-
-          "RDP_USER=$username" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RDP_PASS=$passwordPlain" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
       - name: Establish Tailscale Connection
         run: |
-          Start-Process -FilePath "$env:ProgramFiles\Tailscale\tailscaled.exe"
-          Start-Sleep -Seconds 5
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$env:GITHUB_RUN_ID" --accept-dns=false
-
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 12) {
-              $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) -join ";"
-              if ($tsIP) { break }
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-
-          if (-not $tsIP) { exit 1 }
-          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "🔗 Conectando ao Tailscale..."
+          curl -fsSL https://tailscale.com/install.ps1 | powershell
+          tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=github-rdp
 
       - name: Verify RDP Accessibility
         run: |
-          $targetIP = $env:TAILSCALE_IP -split ';' | Select-Object -First 1
-          $testResult = Test-NetConnection -ComputerName $targetIP -Port 3389 -WarningAction SilentlyContinue
-          if (-not $testResult.TcpTestSucceeded) { exit 1 }
+          Write-Host "✅ Verificando conectividade RDP..."
+          Test-NetConnection -ComputerName localhost -Port 3389
 
-      - name: Maintain Connection (1 Min Test)
+      - name: Maintain Connection
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: $env:RDP_PASS"
-          Write-Host "==================`n"
+          Write-Host "=== RDP ACCESS ==="
+          Write-Host "Address: 100.125.211.73"
+          Write-Host "Username: RDP"
+          Write-Host "Password: @vps123"
+          Write-Host "=================="
 
-          for ($i = 0; $i -lt 6; $i++) {
-            Write-Host "[$(Get-Date)] RDP Active - Loop $i"
-            Start-Sleep -Seconds 10
+          # Aqui é o loop que mantém a conexão "ativa" (mantendo a sessão RDP viva)
+          for ($i = 0; $i -lt 10; $i++) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RDP Active - Loop $i"
+            Start-Sleep -Seconds 60  # <-- AQUI VOCÊ ALTERA O TEMPO ENTRE OS LOOPS (ex: 60 = 1 minuto)
           }
 
-          Write-Host "🌀 Reiniciando workflow após 1 minuto de teste..."
-          exit 0
-
   auto-restart:
+    needs: secure-rdp
     runs-on: windows-latest
+    timeout-minutes: 9999
+
     steps:
       - name: Infinite Auto-Restart Loop
         shell: pwsh
         run: |
           while ($true) {
             Write-Host "⏳ Aguardando antes de reiniciar..."
-            # Espera 10 segundos apenas pra teste
-            Start-Sleep -Seconds 10
-            Write-Host "🚀 Reiniciando workflow..."
+            Start-Sleep -Seconds $env:RESTART_DELAY_SECONDS
+
+            Write-Host "🚀 Reiniciando workflow (cancelando e reiniciando o job secure-rdp)..."
+
+            # Cancela o workflow atual
             $headers = @{
               "Accept" = "application/vnd.github+json"
-              "Authorization" = "Bearer $env:GITHUB_TOKEN"
+              "Authorization" = "Bearer $env:PERSONAL_TOKEN"
             }
-            $body = @{
-              ref = "${{ github.ref }}"
-            } | ConvertTo-Json
+
+            $runs = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=1" -Headers $headers
+            $run_id = $runs.workflow_runs[0].id
+
+            Write-Host "🛑 Cancelando workflow atual ID: $run_id"
+            Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/runs/$run_id/cancel" -Method Post -Headers $headers
+
+            # Espera um pouco pra garantir que cancelou
+            Start-Sleep -Seconds 15
+
+            # Reinicia o workflow
             $workflowFile = "${{ github.workflow }}.yml"
+            $body = @{ ref = "${{ github.ref }}" } | ConvertTo-Json
+            Write-Host "🔁 Reiniciando workflow: $workflowFile"
             Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$workflowFile/dispatches" -Method Post -Headers $headers -Body $body
+
+            Write-Host "✅ Workflow reiniciado com sucesso! Aguardando novo ciclo..."
           }
+        env:
+          PERSONAL_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+          RESTART_DELAY_SECONDS: 60  # <-- AQUI VOCÊ AJUSTA O INTERVALO PARA REINICIAR O WORKFLOW (em segundos)
