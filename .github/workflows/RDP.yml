@@ -1,107 +1,139 @@
-name: RDP
+name: RDP (no password, auto-login)
 
 on:
   workflow_dispatch:
 
 jobs:
-  create-rdp-vps:
+  secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
 
+    env:
+      # tempo para manter o runner ativo (em segundos)
+      KEEP_ALIVE_SECONDS: 600
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Enable RDP
+      - name: Configure Core RDP Settings
         shell: pwsh
         run: |
-          Write-Host "==> Enabling RDP..."
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
-          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
-          Write-Host "✅ RDP Enabled!"
+          Write-Host "==> Enabling Remote Desktop & firewall rule..."
+          # Enable Remote Desktop
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
 
-      - name: Create RDP user (no password)
+          # Optional: disable NLA if needed
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 0 -Force
+
+          # Firewall rule for RDP
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null || Write-Host "no existing rule"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+          # Restart RDP service
+          Restart-Service -Name TermService -Force
+          Write-Host "✅ RDP enabled."
+
+      - name: Create RDP user (no password) and allow blank passwords
         shell: pwsh
         run: |
-          Write-Host "==> Creating user without password..."
+          Write-Host "==> Creating user RDP without password and enabling auto-login settings..."
+
           $user = "RDP"
-          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-            net user $user /add /y
+
+          # Create user with blank password (Windows 'net user username "" /add')
+          if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
+            Write-Host "User $user already exists. Ensuring blank password."
+            # Set blank password via net user (may fail if policy forbids)
+            net user $user "" 2>$null || Write-Host "Could not set blank password via 'net user', continuing..."
+          } else {
+            # Create user with blank password
+            cmd.exe /c "net user $user \"\" /add"
           }
-          # Add to admin and RDP groups
-          net localgroup "Administrators" $user /add
-          net localgroup "Remote Desktop Users" $user /add
-          # Allow login without password
+
+          # Add to Administrators and Remote Desktop Users groups
+          cmd.exe /c "net localgroup Administrators $user /add" 2>$null || Write-Host "Add to Administrators may have failed or already present."
+          cmd.exe /c "net localgroup \"Remote Desktop Users\" $user /add" 2>$null || Write-Host "Add to Remote Desktop Users may have failed or already present."
+
+          # Allow blank passwords for network logon (required to permit remote logon with blank pwd)
+          # Set LimitBlankPasswordUse = 0
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v "LimitBlankPasswordUse" /t REG_DWORD /d 0 /f
+
+          # Configure AutoAdminLogon to automatically log in the user (auto logon)
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "AutoAdminLogon" /t REG_SZ /d "1" /f
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultUserName" /t REG_SZ /d "$user" /f
+
+          # Set DefaultPassword to empty string (explicit) — AutoAdminLogon may require the key; set as empty.
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultPassword" /t REG_SZ /d "" /f
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v "LimitBlankPasswordUse" /t REG_DWORD /d 0 /f
-          "RDP_USER=$user" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "✅ User created: $user (no password, auto login enabled)"
+
+          # In some hosted images the Winlogon keys live under HKLM\SOFTWARE\Wow6432Node\... not typical; above is standard.
+          # Expose env variables for later steps/logs:
+          "RDP_USER=$user" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "✅ User $user created/updated (blank password). Auto logon configured."
 
       - name: Install Tailscale
         shell: pwsh
         run: |
           Write-Host "==> Installing Tailscale..."
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $file = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $url -OutFile $file
-          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
-          Write-Host "✅ Installed."
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+          Write-Host "✅ Tailscale installed."
 
-      - name: Connect to Tailscale
+      - name: Establish Tailscale Connection
         shell: pwsh
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscaled.exe" start-service
+          Write-Host "==> Starting tailscaled and connecting to Tailscale..."
+          Start-Process -FilePath "$env:ProgramFiles\Tailscale\tailscaled.exe"
           Start-Sleep -Seconds 5
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-${{ github.run_id }}"
-          $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) | Select-Object -First 1
-          if (-not $ip) { Write-Error "Failed to obtain Tailscale IP"; exit 1 }
-          "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "✅ Tailscale IP: $ip"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="gh-runner-$env:GITHUB_RUN_ID" --accept-dns=false
 
-      - name: Prepare baixartudo.exe to auto-run on RDP login
-        shell: pwsh
-        run: |
-          $exeSource = Join-Path $env:GITHUB_WORKSPACE "baixartudo.exe"
-          if (-not (Test-Path $exeSource)) {
-            Write-Error "❌ baixartudo.exe not found!"
-            exit 1
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 12) {
+              $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) -join ";"
+              if ($tsIP) { break }
+              Start-Sleep -Seconds 5
+              $retries++
           }
 
-          $destDir = "C:\Users\RDP\Desktop"
-          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-          Copy-Item $exeSource -Destination $destDir -Force
-          Write-Host "✅ Copied baixartudo.exe to Desktop"
+          if (-not $tsIP) {
+              Write-Error "❌ Tailscale IP not assigned. Exiting."
+              exit 1
+          }
 
-          # PowerShell script that runs baixartudo.exe
-          $psScript = @"
-          Start-Sleep -Seconds 5
-          Start-Process -FilePath `"$destDir\baixartudo.exe`" -WindowStyle Normal
-          "@
-          $scriptPath = "C:\Users\RDP\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\runbaixartudo.ps1"
-          New-Item -ItemType File -Path $scriptPath -Force -Value $psScript | Out-Null
+          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "✅ Tailscale connected! IP: $tsIP"
 
-          # .bat launcher to ensure execution
-          $batFile = "C:\Users\RDP\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\runbaixartudo.bat"
-          "@echo off
-          powershell.exe -ExecutionPolicy Bypass -File `"$scriptPath`"
-          " | Out-File -FilePath $batFile -Encoding ASCII
-
-          Write-Host "✅ Configured baixartudo.exe to run on RDP login."
-
-      - name: Show connection info
+      - name: Verify RDP Accessibility
         shell: pwsh
         run: |
-          Write-Host "`n==============================="
-          Write-Host "🟢 VPS ONLINE!"
-          Write-Host "🔹 Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "🔹 RDP user: $env:RDP_USER (no password)"
-          Write-Host "🔹 baixartudo.exe will auto-run on login"
-          Write-Host "==============================="
+          Write-Host "==> Testing RDP connectivity via Tailscale..."
+          $targetIP = $env:TAILSCALE_IP -split ';' | Select-Object -First 1
+          $testResult = Test-NetConnection -ComputerName $targetIP -Port 3389 -WarningAction SilentlyContinue
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "❌ TCP connection to RDP port 3389 failed (Target: $targetIP)"
+              exit 1
+          }
+          Write-Host "✅ RDP port reachable via Tailscale ($targetIP)."
 
-      - name: Keep Alive
+      - name: Maintain Connection (keep alive)
         shell: pwsh
         run: |
-          Write-Host "⏳ Keeping alive for 10 minutes..."
-          Start-Sleep -Seconds 600
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $env:RDP_USER"
+          Write-Host "Password: (blank — auto-login enabled)"
+          Write-Host "==================`n"
+
+          $t = 600
+          for ($i = 0; $i -lt ($t/60); $i++) {
+            Write-Host "[$(Get-Date)] RDP Active - minute $($i+1) / $($t/60)"
+            Start-Sleep -Seconds 60
+          }
+
+          Write-Host "Keep-alive finished. Workflow will exit."
