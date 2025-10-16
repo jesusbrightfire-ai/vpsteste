@@ -3,13 +3,16 @@ name: RDP
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
-      # 🔽 SEU CÓDIGO ORIGINAL INTACTO 🔽
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
@@ -94,7 +97,7 @@ jobs:
         run: |
           while ($true) {
             Write-Host "⏳ Aguardando antes de reiniciar..."
-            # altere aqui: 60s para testes ou 20400s (5h40)
+            # use 60s para testes / 20400s (5h40min) em produção
             Start-Sleep -Seconds 60
             Write-Host "🚀 Reiniciando workflow..."
             $headers = @{
@@ -104,5 +107,6 @@ jobs:
             $body = @{
               ref = "${{ github.ref }}"
             } | ConvertTo-Json
-            Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/RDP.yml/dispatches" -Method Post -Headers $headers -Body $body
+            $workflowFile = "${{ github.workflow }}.yml"
+            Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$workflowFile/dispatches" -Method Post -Headers $headers -Body $body
           }
