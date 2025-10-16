@@ -29,26 +29,47 @@ jobs:
           # Restart Remote Desktop Service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Fixed Password
+      - name: Allow blank passwords for network/remote logon (risky)
+        run: |
+          Write-Host "⚠️ Ajustando política para permitir senhas em branco (LimitBlankPasswordUse = 0)."
+          # This registry key controls "Accounts: Limit local account use of blank passwords to console logon only"
+          New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -ErrorAction SilentlyContinue | Out-Null
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa" -Name "LimitBlankPasswordUse" -Value 0 -Type DWord -Force
+
+          # Ensure network logon behaviour updated immediately
+          secedit /refreshpolicy machine_policy /enforce || Write-Host "secedit refresh may not be available; reboot may be required."
+
+          Write-Host "✅ Registro ajustado. OBS: pode ser necessário reiniciar a VM/runner para efeito completo."
+
+      - name: Create RDP User WITHOUT Password (no prompt)
         run: |
           $username = "RDP"
-          $passwordPlain = ""
-          $securePass = ConvertTo-SecureString $passwordPlain -AsPlainText -Force
 
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-            Write-Host "Local user '$username' already exists. Updating password..."
-            net user $username $passwordPlain
+            Write-Host "Local user '$username' already exists."
           } else {
-            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "RDP user created by workflow"
+            Write-Host "Creating local user '$username' WITHOUT password..."
+            # Try New-LocalUser -NoPassword if available (PowerShell 7+ / Windows 10+)
+            try {
+              New-LocalUser -Name $username -NoPassword -AccountNeverExpires -Description "RDP user (no password) created by workflow"
+              Write-Host "User created with -NoPassword."
+            } catch {
+              Write-Host "Fallback: creating user with empty SecureString (some systems may not allow empty password)."
+              $empty = ConvertTo-SecureString "" -AsPlainText -Force
+              New-LocalUser -Name $username -Password $empty -AccountNeverExpires -Description "RDP user (empty password) created by workflow"
+            }
           }
 
+          # Ensure user is not disabled and is in proper groups
+          Enable-LocalUser -Name $username -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
 
+          # Export to env for later steps (password intentionally blank)
           "RDP_USER=$username" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RDP_PASS=$passwordPlain" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RDP_PASS=" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host "✅ User '$username' configured and ready."
+          Write-Host "✅ User '$username' configured WITHOUT password."
 
       - name: Install Tailscale
         run: |
@@ -102,7 +123,7 @@ jobs:
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: $env:RDP_PASS"
+          Write-Host "Password: (NONE - account has no password)"
           Write-Host "==================`n"
 
           while ($true) {
