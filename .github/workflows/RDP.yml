@@ -76,47 +76,40 @@ jobs:
           $testResult = Test-NetConnection -ComputerName $targetIP -Port 3389 -WarningAction SilentlyContinue
           if (-not $testResult.TcpTestSucceeded) { exit 1 }
 
-      - name: Maintain Connection
+      - name: Maintain Connection (1 Min Test)
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: $env:RDP_USER"
           Write-Host "Password: $env:RDP_PASS"
           Write-Host "==================`n"
-          for ($i = 0; $i -lt 2040; $i++) {
+
+          for ($i = 0; $i -lt 6; $i++) {
             Write-Host "[$(Get-Date)] RDP Active - Loop $i"
             Start-Sleep -Seconds 10
           }
 
+          Write-Host "🌀 Reiniciando workflow após 1 minuto de teste..."
+          exit 0
+
   auto-restart:
     runs-on: windows-latest
-    needs: secure-rdp
     steps:
-      - name: Auto-Restart Same Run (No Duplication)
+      - name: Infinite Auto-Restart Loop
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
         run: |
           while ($true) {
             Write-Host "⏳ Aguardando antes de reiniciar..."
-            # tempo de espera — 60s para teste / 20400s (~5h40min) para produção
-            Start-Sleep -Seconds 60
-
-            Write-Host "♻️ Reexecutando workflow atual (sem nova execução)..."
-            $url = "https://api.github.com/repos/$env:REPO/actions/runs/$env:RUN_ID/rerun"
+            # Espera 10 segundos apenas pra teste
+            Start-Sleep -Seconds 10
+            Write-Host "🚀 Reiniciando workflow..."
             $headers = @{
               "Accept" = "application/vnd.github+json"
-              "Authorization" = "Bearer $env:GH_TOKEN"
+              "Authorization" = "Bearer $env:GITHUB_TOKEN"
             }
-
-            try {
-              Invoke-RestMethod -Uri $url -Method Post -Headers $headers
-              Write-Host "✅ Workflow reexecutado com sucesso (mesma execução)!"
-              break
-            } catch {
-              Write-Host "❌ Falha ao reexecutar: $($_.Exception.Message)"
-              Start-Sleep -Seconds 30
-            }
+            $body = @{
+              ref = "${{ github.ref }}"
+            } | ConvertTo-Json
+            $workflowFile = "${{ github.workflow }}.yml"
+            Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$workflowFile/dispatches" -Method Post -Headers $headers -Body $body
           }
