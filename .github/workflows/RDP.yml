@@ -86,6 +86,80 @@ jobs:
           & $sevenZip x $zipPath -o"$publicDesktop" -y
 
           Write-Host "✅ Sua área de trabalho foi preenchida com seus aplicativos/documentos!"
+          
+      - name: Configurar AnyDesk (instalar, definir senha e mostrar ID)
+        shell: pwsh
+        env:
+          ANYDESK_PASSWORD: ${{ secrets.ANYDESK_PASSWORD }}   # defina no repo secrets
+        run: |
+          Write-Host "==> Procurando anydesk.exe na pasta Public Desktop..."
+          $publicDesktop = "C:\Users\Public\Desktop"
+          $anydeskPath = Get-ChildItem -Path $publicDesktop -Filter "AnyDesk*.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+
+          if (-not $anydeskPath) {
+            Write-Host "⚠️ anydesk.exe não encontrado na Public Desktop. Procurando em TEMP..."
+            $anydeskPath = Get-ChildItem -Path "$env:TEMP" -Filter "AnyDesk*.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+
+          if (-not $anydeskPath) {
+            Write-Error "❌ anydesk.exe não encontrado. Abortando step."
+            exit 1
+          }
+
+          $anydeskExe = $anydeskPath.FullName
+          Write-Host "✅ Encontrado: $anydeskExe"
+
+          # 1) Instalar/registrar AnyDesk (modo silencioso / start-with-win)
+          Write-Host "==> Instalando/registrando AnyDesk (silencioso)..."
+          & $anydeskExe --install "C:\Program Files\AnyDesk" --start-with-win | Out-Null
+          Start-Sleep -Seconds 3
+
+          # 2) Start service (se disponível)
+          Write-Host "==> Iniciando serviço AnyDesk (se aplicável)..."
+          try {
+            & "$env:ProgramFiles\AnyDesk\AnyDesk.exe" --start
+          } catch {
+            Write-Host "⚠️ Falha ao iniciar com --start, tentando start via arquivo encontrado..."
+            & $anydeskExe --start | Out-Null
+          }
+          Start-Sleep -Seconds 2
+
+          # 3) Definir senha de unattended access (usando secret)
+          if (-not $env:ANYDESK_PASSWORD) {
+            Write-Error "❌ ANYDESK_PASSWORD não definido (adicione como secret do repo)."
+            exit 1
+          }
+          Write-Host "==> Definindo senha de Unattended Access (usando secret)..."
+          # o comando lê a senha da entrada padrão
+          cmd /c "echo $env:ANYDESK_PASSWORD | `"$anydeskExe`" --set-password _unattended_access" 2>$null
+
+          Start-Sleep -Seconds 2
+
+          # 4) Obter AnyDesk ID
+          Write-Host "==> Buscando AnyDesk ID..."
+          $idOutput = & $anydeskExe --get-id 2>&1
+          $anydeskId = ($idOutput -join "`n").Trim()
+          if (-not $anydeskId) {
+            Write-Error "❌ Não foi possível obter AnyDesk ID."
+            exit 1
+          }
+          Write-Host "✅ AnyDesk ID: $anydeskId"
+          "ANYDESK_ID=$anydeskId" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          # 5) Mostrar IP Tailscale (se já setado)
+          if ($env:TAILSCALE_IP) {
+            Write-Host "🔹 Tailscale IP: $env:TAILSCALE_IP"
+          } else {
+            Write-Host "⚠️ TAILSCALE_IP não definido ainda."
+          }
+
+          # 6) Imprimir resumo para console do Actions
+          Write-Host "==============================="
+          Write-Host "Acesso AnyDesk (use o ID + senha que você definiu)"
+          Write-Host "AnyDesk ID: $anydeskId"
+          Write-Host "Senha (secreta usada): (oculta no log)"
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "==============================="
 
       - name: SUA CONEXÃO
         shell: pwsh
