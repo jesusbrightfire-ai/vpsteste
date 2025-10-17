@@ -87,7 +87,7 @@ jobs:
 
           Write-Host "✅ Sua área de trabalho foi preenchida com seus aplicativos/documentos!"
           
-            - name: Configurar AnyDesk (instalar, definir senha e obter ID)
+      - name: Configurar AnyDesk (instalar, definir senha e obter ID)
         shell: pwsh
         env:
           ANYDESK_PASSWORD: ${{ secrets.ANYDESK_PASSWORD }}  # Defina no seu repo secrets
