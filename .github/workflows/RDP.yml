@@ -102,4 +102,4 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "⏳ Mantendo VPS ativa por 6 horas..."
-          Start-Sleep -Seconds 3600
+          Start-Sleep -Seconds 21600
