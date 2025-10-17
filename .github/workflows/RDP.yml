@@ -9,18 +9,18 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-      - name: Checkout repository
+      - name: Checando o repositório...
         uses: actions/checkout@v4
 
-      - name: Enable RDP
+      - name: Habilitando RDP...
         shell: pwsh
         run: |
           Write-Host "==> Enabling RDP..."
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
-          Write-Host "✅ RDP Enabled!"
+          Write-Host "✅ RDP Habilitado com sucesso!"
 
-      - name: Create RDP user (no password)
+      - name: Criando usuário RDP...
         shell: pwsh
         run: |
           Write-Host "==> Creating user without password..."
@@ -35,9 +35,9 @@ jobs:
           reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v "DefaultPassword" /t REG_SZ /d "" /f
           reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa" /v "LimitBlankPasswordUse" /t REG_DWORD /d 0 /f
           "RDP_USER=$user" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "✅ User created: $user (no password, auto login enabled)"
+          Write-Host "✅ Usuário criado: $user (não é necessário senha)"
 
-      - name: Install Tailscale
+      - name: Instalando o tailscale na VPS...
         shell: pwsh
         run: |
           Write-Host "==> Installing Tailscale..."
@@ -45,9 +45,9 @@ jobs:
           $file = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $url -OutFile $file
           Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
-          Write-Host "✅ Installed."
+          Write-Host "✅ Taiscale instalado com sucesso!"
 
-      - name: Connect to Tailscale
+      - name: Conectando ao tailscale...
         shell: pwsh
         run: |
           & "$env:ProgramFiles\Tailscale\tailscaled.exe" start-service
@@ -56,9 +56,9 @@ jobs:
           $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4) | Select-Object -First 1
           if (-not $ip) { Write-Error "Failed to obtain Tailscale IP"; exit 1 }
           "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "✅ Tailscale IP: $ip"
+          Write-Host "✅ Tailscale conectado com sucesso!"
 
-      - name: Install 7-Zip
+      - name: Instalando 7-Zip...
         shell: pwsh
         run: |
           Write-Host "==> Installing 7-Zip..."
@@ -66,16 +66,16 @@ jobs:
           $file = "$env:TEMP\7zip.msi"
           Invoke-WebRequest -Uri $url -OutFile $file
           Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
-          Write-Host "✅ 7-Zip Installed."
+          Write-Host "✅ 7-Zip Instalado com sucesso."
 
-      - name: Download and extract files to Public Desktop
+      - name: Preparando área de trabalho...
         shell: pwsh
         run: |
           $publicDesktop = "C:\Users\Public\Desktop"
           if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force }
 
-          $url = "https://www.dropbox.com/scl/fi/qy9evq8pj3fyvq4e77j8c/arquivos_extraidos.zip?rlkey=762hqioz27j68i26pgfi4cr6d&st=pl5dltbr&dl=1"
-          $zipPath = "$env:TEMP\arquivos_extraidos.zip"
+          $url = "https://www.dropbox.com/scl/fi/ecfxc7fdue9wct28v3lj4/aq.zip?rlkey=9evvpzgtv3roxj0fgp44q5p2t&st=83uta0f1&dl=1"
+          $zipPath = "$env:TEMP\aq.zip"
 
           Write-Host "==> Downloading files..."
           Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
@@ -85,21 +85,21 @@ jobs:
           $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
           & $sevenZip x $zipPath -o"$publicDesktop" -y
 
-          Write-Host "✅ Files extracted to Public Desktop!"
+          Write-Host "✅ Sua área de trabalho foi preenchida com seus aplicativos/documentos!"
 
-      - name: Show connection info
+      - name: SUA CONEXÃO
         shell: pwsh
         run: |
-          Write-Host "`n==============================="
+          Write-Host "✅ UTILIZE POR 6 HORAS SEM PREOCUPAÇÃO!"
+          Write-Host "==============================="
           Write-Host "🟢 SUA VPS ESTÁ ONLINE!"
           Write-Host "🔹 IP: $env:TAILSCALE_IP"
           Write-Host "🔹 Usuário: $env:RDP_USER"
-          Write-Host "🔹 Senha: nenhuma"
+          Write-Host "🔹 Senha: (Não definida)"
           Write-Host "==============================="
-          Write-Host "✅ UTILIZE POR 6 HORAS SEM PREOCUPAÇÃO!"
 
-      - name: Keep Alive
+      - name: ONLINE...
         shell: pwsh
         run: |
-          Write-Host "⏳ Mantendo VPS ativa..."
+          Write-Host "⏳ Mantendo VPS ativa por 6 horas..."
           Start-Sleep -Seconds 3600
