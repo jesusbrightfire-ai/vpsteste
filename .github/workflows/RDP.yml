@@ -68,25 +68,6 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
           Write-Host "✅ 7-Zip Instalado com sucesso."
 
-      - name: Preparando área de trabalho...
-        shell: pwsh
-        run: |
-          $publicDesktop = "C:\Users\Public\Desktop"
-          if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force }
-
-          $url = "https://www.dropbox.com/scl/fi/ecfxc7fdue9wct28v3lj4/aq.zip?rlkey=9evvpzgtv3roxj0fgp44q5p2t&st=83uta0f1&dl=1"
-          $zipPath = "$env:TEMP\aq.zip"
-
-          Write-Host "==> Downloading files..."
-          Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
-          Start-Sleep -Seconds 2
-
-          Write-Host "==> Extracting files to Public Desktop..."
-          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
-          & $sevenZip x $zipPath -o"$publicDesktop" -y
-
-          Write-Host "✅ Sua área de trabalho foi preenchida com seus aplicativos/documentos!"
-
       - name: SUA CONEXÃO
         shell: pwsh
         run: |
